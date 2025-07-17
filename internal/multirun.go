@@ -1,13 +1,10 @@
-// multirun.go
 package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -27,170 +24,181 @@ type Command struct {
 type Instructions struct {
 	WorkspaceName string    `json:"workspace_name"`
 	Commands      []Command `json:"commands"`
-	Jobs          int       `json:"jobs"`
+	Jobs          int       `json:"jobs"` // 0 = parallel
 	PrintCommand  bool      `json:"print_command"`
 	KeepGoing     bool      `json:"keep_going"`
 	BufferOutput  bool      `json:"buffer_output"`
 	ForwardStdin  bool      `json:"forward_stdin"`
 }
 
-func runCommand(cmd Command, block bool, stdin io.Reader, stdout io.Writer) (*exec.Cmd, error) {
+func buildCmd(cmd Command) *exec.Cmd {
 	args := cmd.Args
-	path := cmd.Path
-
 	if runtime.GOOS == "windows" {
 		bash := os.Getenv("BAZEL_SH")
 		if bash == "" {
 			bash, _ = exec.LookPath("bash.exe")
-			if bash == "" {
-				return nil, fmt.Errorf("bash not found on Windows")
-			}
 		}
-		args = append([]string{"-c", fmt.Sprintf("%s \"$@\"", cmd.Path), "--"}, args...)
-		path = bash
+		if bash == "" {
+			fmt.Fprintln(os.Stderr, "error: bash not found. Set BAZEL_SH or install Git Bash/MSYS2.")
+			os.Exit(1)
+		}
+		quotedArgs := strings.Join(args, `" "`)
+		script := fmt.Sprintf(`%s "$@"`, cmd.Path)
+		args = []string{"-c", script, "--"}
+		args = append(args, cmd.Args...)
+		return exec.Command(bash, args...)
 	}
-
-	execCmd := exec.Command(path, args...)
-	execCmd.Env = append(os.Environ(), flattenEnv(cmd.Env)...) // merge env
-	execCmd.Stdin = stdin
-	execCmd.Stdout = stdout
-	execCmd.Stderr = stdout
-
-	if block {
-		execCmd.Stdout = os.Stdout
-		execCmd.Stderr = os.Stderr
-		return execCmd, execCmd.Run()
-	}
-
-	return execCmd, execCmd.Start()
+	return exec.Command(cmd.Path, args...)
 }
 
-func flattenEnv(env map[string]string) []string {
-	out := make([]string, 0, len(env))
+func setEnv(cmd *exec.Cmd, env map[string]string) {
+	cmd.Env = os.Environ()
 	for k, v := range env {
-		out = append(out, fmt.Sprintf("%s=%s", k, v))
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
 	}
-	return out
 }
 
-func performConcurrently(commands []Command, printCommand, bufferOutput, forwardStdin bool, extraArgs []string) bool {
+func runSerial(instructions Instructions) bool {
+	for _, c := range instructions.Commands {
+		if instructions.PrintCommand {
+			fmt.Println(c.Tag)
+		}
+		cmd := buildCmd(c)
+		setEnv(cmd, c.Env)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			if !instructions.KeepGoing {
+				return false
+			}
+			fmt.Fprintf(os.Stderr, "Command failed: %s\n", c.Tag)
+		}
+	}
+	return true
+}
+
+func forwardStdin(writers []io.WriteCloser) {
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		line := scanner.Text() + "\n"
+		for _, w := range writers {
+			w.Write([]byte(line))
+			w.(interface{ Flush() error }).Flush()
+		}
+	}
+	for _, w := range writers {
+		w.Close()
+	}
+}
+
+func runParallel(instructions Instructions) bool {
 	var wg sync.WaitGroup
+	var mu sync.Mutex
 	success := true
-	_, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
 
-	type taggedProc struct {
-		Cmd  *exec.Cmd
-		Tag  string
-		Pipe io.WriteCloser
-	}
+	procs := make([]*exec.Cmd, 0, len(instructions.Commands))
+	stdins := make([]io.WriteCloser, 0, len(instructions.Commands))
 
-	procs := make([]taggedProc, 0, len(commands))
-	for _, cmd := range commands {
-		pr, pw := io.Pipe()
-		execCmd, err := runCommand(cmd, false, nil, pw)
-		if err != nil {
-			log.Printf("failed to start command %s: %v", cmd.Tag, err)
-			success = false
-			continue
+	for _, c := range instructions.Commands {
+		if instructions.PrintCommand && instructions.BufferOutput {
+			fmt.Println(c.Tag)
 		}
+		cmd := buildCmd(c)
+		setEnv(cmd, c.Env)
 
-		procs = append(procs, taggedProc{Cmd: execCmd, Tag: cmd.Tag, Pipe: pw})
-
-		if bufferOutput {
+		if instructions.BufferOutput {
+			stdoutPipe, _ := cmd.StdoutPipe()
+			cmd.Stderr = cmd.Stdout
 			wg.Add(1)
-			go func(tag string, r io.Reader) {
+			go func(tag string, out io.ReadCloser) {
 				defer wg.Done()
-				scanner := bufio.NewScanner(r)
+				scanner := bufio.NewScanner(out)
+				var buf strings.Builder
 				for scanner.Scan() {
-					fmt.Printf("[%s] %s\n", tag, scanner.Text())
+					buf.WriteString(scanner.Text() + "\n")
 				}
-			}(cmd.Tag, pr)
+				mu.Lock()
+				fmt.Printf("[%s]\n%s", tag, buf.String())
+				mu.Unlock()
+			}(c.Tag, stdoutPipe)
+		} else {
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
 		}
+
+		if instructions.ForwardStdin {
+			in, _ := cmd.StdinPipe()
+			stdins = append(stdins, in)
+		}
+
+		procs = append(procs, cmd)
 	}
 
-	if forwardStdin {
-		go func() {
-			scanner := bufio.NewScanner(os.Stdin)
-			for scanner.Scan() {
-				line := scanner.Text() + "\n"
-				for _, p := range procs {
-					p.Pipe.Write([]byte(line))
-				}
-			}
-			for _, p := range procs {
-				p.Pipe.Close()
-			}
-		}()
-	}
-
-	for _, proc := range procs {
-		if err := proc.Cmd.Wait(); err != nil {
-			log.Printf("%s exited with error: %v", proc.Tag, err)
+	for _, cmd := range procs {
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to start: %v\n", err)
 			success = false
 		}
 	}
-	wg.Wait()
-	return success
-}
 
-func performSerially(commands []Command, printCommand, keepGoing bool) bool {
-	success := true
-	for _, cmd := range commands {
-		if printCommand {
-			fmt.Println(cmd.Tag)
+	if instructions.ForwardStdin {
+		go forwardStdin(stdins)
+	}
+
+	interrupt := make(chan os.Signal, 1)
+	signal.Notify(interrupt, os.Interrupt)
+	go func() {
+		<-interrupt
+		for _, p := range procs {
+			_ = p.Process.Signal(os.Interrupt)
 		}
-		_, err := runCommand(cmd, true, os.Stdin, os.Stdout)
+	}()
+
+	for _, cmd := range procs {
+		err := cmd.Wait()
 		if err != nil {
-			if keepGoing {
-				success = false
-				continue
-			}
-			return false
+			success = false
 		}
 	}
+
+	wg.Wait()
 	return success
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatal("usage: multirun <instructions.json> [extra args...]")
+		fmt.Fprintln(os.Stderr, "Usage: multirun <instructions.json> [extra args...]")
+		os.Exit(1)
 	}
 
-	instructionsPath := os.Args[1]
+	path := os.Args[1]
 	extraArgs := os.Args[2:]
 
-	file, err := os.Open(instructionsPath)
+	data, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
-		log.Fatalf("failed to open instructions: %v", err)
+		fmt.Fprintf(os.Stderr, "Failed to read instructions: %v\n", err)
+		os.Exit(1)
 	}
-	defer file.Close()
 
-	decoder := json.NewDecoder(file)
 	var instr Instructions
-	if err := decoder.Decode(&instr); err != nil {
-		log.Fatalf("failed to parse instructions: %v", err)
+	if err := json.Unmarshal(data, &instr); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to parse JSON: %v\n", err)
+		os.Exit(1)
 	}
 
-	// Adjust paths
+	// Append extra args to each command
 	for i := range instr.Commands {
-		cmd := &instr.Commands[i]
-		if strings.HasPrefix(cmd.Path, "../") {
-			cmd.Path = filepath.Join("..", cmd.Path[3:])
-		} else {
-			cmd.Path = filepath.Join("bazel-bin", instr.WorkspaceName, cmd.Path)
-		}
-		cmd.Args = append(cmd.Args, extraArgs...)
+		instr.Commands[i].Args = append(instr.Commands[i].Args, extraArgs...)
 	}
 
-	var success bool
+	var ok bool
 	if instr.Jobs == 0 {
-		success = performConcurrently(instr.Commands, instr.PrintCommand, instr.BufferOutput, instr.ForwardStdin, extraArgs)
+		ok = runParallel(instr)
 	} else {
-		success = performSerially(instr.Commands, instr.PrintCommand, instr.KeepGoing)
+		ok = runSerial(instr)
 	}
 
-	if !success {
+	if !ok {
 		os.Exit(1)
 	}
 }
