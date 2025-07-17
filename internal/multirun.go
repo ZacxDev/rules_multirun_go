@@ -15,7 +15,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 )
 
 type Command struct {
@@ -77,7 +76,7 @@ func flattenEnv(env map[string]string) []string {
 func performConcurrently(commands []Command, printCommand, bufferOutput, forwardStdin bool, extraArgs []string) bool {
 	var wg sync.WaitGroup
 	success := true
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	_, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
 	type taggedProc struct {

@@ -1,14 +1,18 @@
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
-load("@rules_python//python:defs.bzl", "py_binary")
+load("@io_bazel_rules_go//go:def.bzl", "go_binary")
 
-py_binary(
+go_binary(
     name = "multirun",
-    srcs = ["multirun.py"],
-    python_version = "PY3",
+    embed = [":multirun_lib"],
     visibility = ["//visibility:public"],
-    deps = [
-        "@rules_python//python/runfiles",
-    ],
+)
+
+go_library(
+    name = "multirun_lib",
+    srcs = ["multirun.go"],
+    importpath = "github.com/ZacxDev/multirun",
+    visibility = ["//visibility:private"],
+    deps = [],
 )
 
 bzl_library(

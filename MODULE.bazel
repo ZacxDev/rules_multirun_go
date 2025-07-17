@@ -6,7 +6,7 @@ module(
 
 bazel_dep(name = "rules_shell", version = "0.4.1")
 bazel_dep(name = "bazel_skylib", version = "1.4.2")
-bazel_dep(name = "rules_python", version = "0.36.0")
+bazel_dep(name = "rules_go", version = "0.55.1")
 
 bazel_dep(
     name = "stardoc",
@@ -14,3 +14,15 @@ bazel_dep(
     dev_dependency = True,
     repo_name = "io_bazel_stardoc",
 )
+
+go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk.download(
+    name = "go_sdk",
+    version = "1.24.0",
+)
+use_repo(go_sdk, "go_sdk")
+
+#go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+#go_deps.from_file(go_mod = "//internal:go.mod")
+#use_repo(go_deps, "")
+
