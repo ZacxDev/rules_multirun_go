@@ -24,7 +24,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/bazelbuild/rules_go/runfiles"
+	"github.com/bazelbuild/rules_go/go/runfiles"
 )
 
 // -----------------------------------------------------------------------------

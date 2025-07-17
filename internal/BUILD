@@ -6,7 +6,7 @@ go_binary(
     embed = [":multirun_lib"],
     visibility = ["//visibility:public"],
     deps = [
-      "@io_bazel_rules_go//go/runfiles",  # 👈 required for github.com/bazelbuild/rules_go/runfiles
+      "@rules_go//go/runfiles",
     ],
 )
 
