@@ -12,7 +12,9 @@ go_library(
     srcs = ["multirun.go"],
     importpath = "github.com/ZacxDev/multirun",
     visibility = ["//visibility:private"],
-    deps = [],
+    deps = [
+      "@io_bazel_rules_go//go/runfiles",
+    ],
 )
 
 bzl_library(
