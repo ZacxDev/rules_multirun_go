@@ -42,7 +42,7 @@ func buildCmd(cmd Command) *exec.Cmd {
 			fmt.Fprintln(os.Stderr, "error: bash not found. Set BAZEL_SH or install Git Bash/MSYS2.")
 			os.Exit(1)
 		}
-		quotedArgs := strings.Join(args, `" "`)
+		_ = strings.Join(args, `" "`)
 		script := fmt.Sprintf(`%s "$@"`, cmd.Path)
 		args = []string{"-c", script, "--"}
 		args = append(args, cmd.Args...)
