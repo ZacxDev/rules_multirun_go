@@ -24,6 +24,7 @@ import (
 	"sync"
 	"syscall"
 
+	// this is only resolved by bazel
 	"github.com/bazelbuild/rules_go/go/runfiles"
 )
 
@@ -71,9 +72,18 @@ func bashOnWindows() (string, error) {
 func scriptPath(r *runfiles.Runfiles, workspace, p string) (string, error) {
 	// Behaviour identical to Python: leading "../" means external, else in‑workspace.
 	if strings.HasPrefix(p, "../") {
-		return r.Rlocation(p[3:]), nil
+		val, err := r.Rlocation(p[3:])
+		if err != nil {
+			return "", err
+		}
+		return val, nil
+
 	}
-	return r.Rlocation(filepath.ToSlash(filepath.Join(workspace, p))), nil
+	val, err := r.Rlocation(filepath.ToSlash(filepath.Join(workspace, p)))
+	if err != nil {
+		return "", err
+	}
+	return val, nil
 }
 
 // -----------------------------------------------------------------------------
